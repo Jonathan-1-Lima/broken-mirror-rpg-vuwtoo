@@ -1,10 +1,10 @@
 /* =========================================================
    net.js
-   Multiplayer: WebSocket (/ws) e, se o host bloquear WS, HTTP /api/sync.
+   Multiplayer: HTTP /api (Render/HTTPS) e WebSocket /ws (local).
    Mesmo codigo da sala = mesmo mundo. Sem codigo, joga sozinho.
    ========================================================= */
 
-const net = {
+window.net = {
   ws: null,
   id: null,
   connected: false,
@@ -13,8 +13,12 @@ const net = {
   lastSent: 0,
   pollTimer: 0,
   pending: null,
-  seenDice: ""
+  seenDice: "",
+  joinName: "",
+  joinChar: ""
 };
+
+var net = window.net;
 
 function netUrl() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -52,6 +56,7 @@ net.tick = function () {
 
 net.snapshot = function () {
   const p = engine.player;
+  if (!p) return { type: "state" };
   const now = performance.now();
   return {
     type: "state",
@@ -69,6 +74,12 @@ net.snapshot = function () {
 function applyRemoteList(list) {
   engine.remotes = othersOf(list).map((r) => {
     const prev = (engine.remotes || []).find((p) => p.id === r.id) || {};
+    let sheet = prev.sheet;
+    try {
+      sheet = sheet || sheetForChar(r.charId);
+    } catch (err) {
+      sheet = prev.sheet;
+    }
     return {
       id: r.id,
       name: r.name,
@@ -82,7 +93,7 @@ function applyRemoteList(list) {
       mapId: r.mapId || "hall",
       pose: r.pose || prev.pose,
       poseUntil: r.pose ? (prev.poseUntil || performance.now() + 1200) : 0,
-      sheet: sheetForChar(r.charId)
+      sheet: sheet
     };
   });
 }
@@ -159,7 +170,10 @@ function onNetMessage(msg) {
   }
   if (msg.type === "error") {
     toast(msg.reason || "Nao foi possivel entrar.");
-    if (msg.reason && msg.reason.indexOf("expirada") >= 0) net.connected = false;
+    if (msg.reason && msg.reason.indexOf("expirada") >= 0) {
+      net.connected = false;
+      if (net.room && net.joinName) joinHttp(net.room, net.joinName, net.joinChar);
+    }
   }
 }
 
@@ -172,6 +186,10 @@ function postApi(path, body, cb) {
 }
 
 function startPoll() {
+  if (net.pollTimer) {
+    clearTimeout(net.pollTimer);
+    net.pollTimer = 0;
+  }
   if (net.mode === "ws" && net.connected) return;
   net.mode = "http";
   const body = { id: net.id, state: net.snapshot() };
@@ -193,7 +211,7 @@ function startPoll() {
 function joinHttp(room, name, charId) {
   postApi("/api/join", { room: room, name: name, charId: charId }, (msg) => {
     if (!msg || (msg.type !== "welcome" && msg.type !== "sync")) {
-      toast("Servidor da sala nao respondeu. So funciona se o site estiver no Render (python3 server.py), nao no GitHub Pages.");
+      toast("Servidor da sala nao respondeu. Recarregue a pagina (Ctrl+F5) no link do Render.");
       netLabel("solo");
       return;
     }
@@ -205,27 +223,47 @@ function joinHttp(room, name, charId) {
 
 net.join = function (room, name, charId) {
   net.room = (room || "").replace(/[^A-Z0-9]/gi, "").slice(0, 8).toUpperCase();
+  net.joinName = name || "Jogador";
+  net.joinChar = charId || "chindu";
   if (!net.room) {
     netLabel("solo");
     return;
   }
+  net.connected = false;
+  net.id = null;
+  net.mode = "";
+  if (net.pollTimer) {
+    clearTimeout(net.pollTimer);
+    net.pollTimer = 0;
+  }
+  if (net.ws) {
+    try { net.ws.close(); } catch (err) { /* ok */ }
+    net.ws = null;
+  }
   netLabel("conectando...");
+
+  /* HTTPS (Render): HTTP primeiro. O proxy costuma engolir o WebSocket caseiro. */
+  if (location.protocol === "https:") {
+    joinHttp(net.room, net.joinName, net.joinChar);
+    return;
+  }
+
   let ws;
   try {
     ws = new WebSocket(netUrl());
   } catch (err) {
-    joinHttp(net.room, name, charId);
+    joinHttp(net.room, net.joinName, net.joinChar);
     return;
   }
   net.ws = ws;
   const fallback = setTimeout(() => {
     if (net.connected) return;
     try { ws.close(); } catch (err) { /* ok */ }
-    joinHttp(net.room, name, charId);
-  }, 1500);
+    joinHttp(net.room, net.joinName, net.joinChar);
+  }, 1200);
   ws.onopen = function () {
     net.mode = "ws";
-    net.send({ type: "join", room: net.room, name: name, charId: charId });
+    net.send({ type: "join", room: net.room, name: net.joinName, charId: net.joinChar });
   };
   ws.onmessage = function (ev) {
     clearTimeout(fallback);
@@ -237,7 +275,7 @@ net.join = function (room, name, charId) {
     if (net.mode === "ws") {
       net.connected = false;
       engine.remotes = [];
-      if (net.room) netLabel("sala " + net.room + " (offline)");
+      if (net.room) joinHttp(net.room, net.joinName, net.joinChar);
     }
   };
   ws.onerror = function () {
