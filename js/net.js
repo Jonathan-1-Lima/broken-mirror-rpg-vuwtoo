@@ -1,23 +1,19 @@
 /* =========================================================
    net.js
-   Multiplayer simples (WebSocket).
-
-   Como usar:
-   - Na tela de escolha, digite o MESMO codigo da sala (ex.: MIRROR)
-   - Ate MAX_PLAYERS pessoas (padrao 8). Para ampliar: js/data.js e server.py
-
-   Sem codigo, o jogo continua sozinho (nao tenta conectar).
-
-   O que viaja pela rede: posicao, mapa, pose, chat, dados, assento.
-   Nada de senha, e-mail ou dado pessoal.
+   Multiplayer: WebSocket (/ws) e, se o host bloquear WS, HTTP /api/sync.
+   Mesmo codigo da sala = mesmo mundo. Sem codigo, joga sozinho.
    ========================================================= */
 
 const net = {
   ws: null,
   id: null,
   connected: false,
+  mode: "",
   room: "",
-  lastSent: 0
+  lastSent: 0,
+  pollTimer: 0,
+  pending: null,
+  seenDice: ""
 };
 
 function netUrl() {
@@ -30,22 +26,34 @@ function netLabel(text) {
   if (el) el.textContent = text;
 }
 
+function othersOf(list) {
+  return (list || []).filter((p) => p && p.id && p.id !== net.id);
+}
+
 net.send = function (obj) {
-  if (!net.ws || net.ws.readyState !== 1) return;
-  try {
-    net.ws.send(JSON.stringify(obj));
-  } catch (err) {
-    /* conexao caiu no meio do envio: o onclose trata */
+  if (!obj) return;
+  if (net.mode === "ws" && net.ws && net.ws.readyState === 1) {
+    try {
+      net.ws.send(JSON.stringify(obj));
+    } catch (err) { /* onclose trata */ }
+    return;
   }
+  if (net.mode === "http" && obj.type !== "state") net.pending = obj;
 };
 
 net.tick = function () {
   if (!net.connected || !engine.player || !engine.map) return;
+  if (net.mode !== "ws") return;
   const now = performance.now();
   if (now - net.lastSent < 80) return;
   net.lastSent = now;
+  net.send(net.snapshot());
+};
+
+net.snapshot = function () {
   const p = engine.player;
-  net.send({
+  const now = performance.now();
+  return {
     type: "state",
     x: Math.round(p.x),
     y: Math.round(p.y),
@@ -53,13 +61,13 @@ net.tick = function () {
     walkFrame: p.walkFrame,
     seated: !!p.seated,
     seatId: p.seatId,
-    mapId: engine.map.id,
+    mapId: engine.map ? engine.map.id : "hall",
     pose: p.pose && p.poseUntil > now ? p.pose : null
-  });
+  };
 };
 
 function applyRemoteList(list) {
-  engine.remotes = (list || []).map((r) => {
+  engine.remotes = othersOf(list).map((r) => {
     const prev = (engine.remotes || []).find((p) => p.id === r.id) || {};
     return {
       id: r.id,
@@ -79,26 +87,36 @@ function applyRemoteList(list) {
   });
 }
 
-function applySeats(seats) {
-  if (!seats) return;
-  tableSystem.seats = Object.assign(tableSystem.seats, seats);
+function applySeats(seats, locked, turnSeat) {
+  if (seats) tableSystem.seats = Object.assign(tableSystem.seats, seats);
+  if (locked != null) tableSystem.locked = locked;
+  if (turnSeat !== undefined) tableSystem.turnSeat = turnSeat;
   if (tableSystem.panelOpen) renderTableUI();
 }
 
-function onNetMessage(raw) {
-  let msg;
-  try {
-    msg = JSON.parse(raw);
-  } catch (err) {
-    return;
-  }
+function applyDice(msg) {
+  if (!msg || !msg.items) return;
+  const key = (msg.from || msg.name) + ":" + msg.items.map((i) => i.text).join(",");
+  if (key === net.seenDice) return;
+  net.seenDice = key;
+  if (msg.from && msg.from === net.id) return;
+  addChatMessage(msg.name, "rolou  " + diceLine(msg.items), "sys");
+  animateDice(msg.items, true);
+}
+
+function onNetMessage(msg) {
+  if (!msg || !msg.type) return;
   if (msg.type === "welcome") {
     net.id = msg.id;
     net.connected = true;
     netLabel("sala " + net.room + "  " + msg.count + "/" + (msg.max || MAX_PLAYERS));
     applyRemoteList(msg.players);
-    applySeats(msg.seats);
-    addChatMessage("Sala", "Conectado. " + msg.count + " de " + (msg.max || MAX_PLAYERS) + " lugares.", "sys");
+    applySeats(msg.seats, msg.locked, msg.turnSeat);
+    if (engine.player && msg.x != null) {
+      engine.player.x = msg.x;
+      engine.player.y = msg.y;
+    }
+    addChatMessage("Sala", "Conectado. " + msg.count + " de " + (msg.max || MAX_PLAYERS) + " na sala.", "sys");
     return;
   }
   if (msg.type === "players") {
@@ -106,11 +124,16 @@ function onNetMessage(raw) {
     if (msg.count != null) netLabel("sala " + net.room + "  " + msg.count + "/" + (msg.max || MAX_PLAYERS));
     return;
   }
+  if (msg.type === "sync") {
+    net.connected = true;
+    applyRemoteList(msg.players);
+    applySeats(msg.seats, msg.locked, msg.turnSeat);
+    if (msg.count != null) netLabel("sala " + net.room + "  " + msg.count + "/" + (msg.max || MAX_PLAYERS));
+    (msg.events || []).forEach(onNetMessage);
+    return;
+  }
   if (msg.type === "seats") {
-    applySeats(msg.seats);
-    if (msg.locked != null) tableSystem.locked = msg.locked;
-    if (msg.turnSeat !== undefined) tableSystem.turnSeat = msg.turnSeat;
-    if (tableSystem.panelOpen) renderTableUI();
+    applySeats(msg.seats, msg.locked, msg.turnSeat);
     return;
   }
   if (msg.type === "chat") {
@@ -118,8 +141,7 @@ function onNetMessage(raw) {
     return;
   }
   if (msg.type === "dice") {
-    addChatMessage(msg.name, "rolou  " + diceLine(msg.items), "sys");
-    animateDice(msg.items, true);
+    applyDice(msg);
     return;
   }
   if (msg.type === "pose") {
@@ -137,35 +159,88 @@ function onNetMessage(raw) {
   }
   if (msg.type === "error") {
     toast(msg.reason || "Nao foi possivel entrar.");
+    if (msg.reason && msg.reason.indexOf("expirada") >= 0) net.connected = false;
   }
+}
+
+function postApi(path, body, cb) {
+  fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  }).then((res) => res.json()).then(cb).catch(() => cb(null));
+}
+
+function startPoll() {
+  if (net.mode === "ws" && net.connected) return;
+  net.mode = "http";
+  const body = { id: net.id, state: net.snapshot() };
+  if (net.pending) {
+    body.event = net.pending;
+    net.pending = null;
+  }
+  postApi("/api/sync", body, (msg) => {
+    if (!msg) {
+      netLabel("sala " + net.room + " (offline)");
+      net.pollTimer = setTimeout(startPoll, 900);
+      return;
+    }
+    onNetMessage(msg);
+    net.pollTimer = setTimeout(startPoll, 220);
+  });
+}
+
+function joinHttp(room, name, charId) {
+  postApi("/api/join", { room: room, name: name, charId: charId }, (msg) => {
+    if (!msg || (msg.type !== "welcome" && msg.type !== "sync")) {
+      toast("Servidor da sala nao respondeu. So funciona se o site estiver no Render (python3 server.py), nao no GitHub Pages.");
+      netLabel("solo");
+      return;
+    }
+    net.mode = "http";
+    onNetMessage(msg);
+    startPoll();
+  });
 }
 
 net.join = function (room, name, charId) {
   net.room = (room || "").replace(/[^A-Z0-9]/gi, "").slice(0, 8).toUpperCase();
-  if (!net.room) return;
+  if (!net.room) {
+    netLabel("solo");
+    return;
+  }
   netLabel("conectando...");
   let ws;
   try {
     ws = new WebSocket(netUrl());
   } catch (err) {
-    netLabel("solo");
-    toast("Multiplayer indisponivel. Jogando sozinho.");
+    joinHttp(net.room, name, charId);
     return;
   }
   net.ws = ws;
+  const fallback = setTimeout(() => {
+    if (net.connected) return;
+    try { ws.close(); } catch (err) { /* ok */ }
+    joinHttp(net.room, name, charId);
+  }, 1500);
   ws.onopen = function () {
+    net.mode = "ws";
     net.send({ type: "join", room: net.room, name: name, charId: charId });
   };
   ws.onmessage = function (ev) {
-    onNetMessage(ev.data);
+    clearTimeout(fallback);
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (err) { return; }
+    onNetMessage(msg);
   };
   ws.onclose = function () {
-    net.connected = false;
-    engine.remotes = [];
-    if (net.room) netLabel("sala " + net.room + " (offline)");
+    if (net.mode === "ws") {
+      net.connected = false;
+      engine.remotes = [];
+      if (net.room) netLabel("sala " + net.room + " (offline)");
+    }
   };
   ws.onerror = function () {
-    toast("Servidor da sala nao respondeu. Voce continua sozinho.");
-    netLabel("solo");
+    /* o timeout cai no HTTP */
   };
 };
