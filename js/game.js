@@ -94,7 +94,7 @@ function startGame() {
   applyCharacter(game.character);
   document.getElementById("hud-name").textContent = name;
   const roomHud = document.getElementById("hud-room");
-  if (roomHud) roomHud.textContent = room ? ("sala " + room) : "solo";
+  if (roomHud) roomHud.textContent = room ? ("sala " + room + "  ...") : "solo";
 
   if (game.changingAvatar && engine.running) {
     game.changingAvatar = false;
@@ -121,7 +121,7 @@ function startGame() {
   });
   toast("Bem-vindo, " + name + ". Va ate a porta dourada.");
   addChatMessage("Sala", "Bem-vindo a Broken Mirror, " + name + ".", "sys");
-  if (room && window.net) net.join(room, name, game.character.id);
+  if (room) net.join(room, name, game.character.id);
 }
 
 function boot() {
