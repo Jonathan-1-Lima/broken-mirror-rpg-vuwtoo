@@ -233,6 +233,7 @@ def join_room(client: Client, room_code: str, name: str, char_id: str) -> str | 
             "players": snapshot_players(room),
         }, skip=client)
         broadcast(room, {"type": "chat", "name": "Sala", "text": name + " entrou.", "kind": "sys"}, skip=client)
+        print("join %s room=%s mode=%s count=%s" % (name, room_code, client.mode, len(room.clients)), flush=True)
         return None
 
 
