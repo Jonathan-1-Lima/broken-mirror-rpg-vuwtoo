@@ -1,45 +1,36 @@
 #!/usr/bin/env python3
 # =========================================================
 # server.py
-# Servidor unico do Broken Mirror RPG.
+# Arquivos do site + multiplayer (WebSocket /ws e HTTP /api).
 #
-# O que faz:
-#   - entrega os arquivos do site (HTML, CSS, JS, imagens)
-#   - abre o WebSocket em /ws para o multiplayer simples
-#
-# Como ampliar o numero de pessoas por sala:
-#   1) mude MAX_PLAYERS aqui
-#   2) mude MAX_PLAYERS em js/data.js
-#
-# Como rodar:
-#   python3 server.py
-# Porta: 8000 (altere PORT se precisar)
+# Ampliar jogadores: MAX_PLAYERS aqui e em js/data.js
+# Rodar: python3 server.py
 # =========================================================
 
 from __future__ import annotations
 
-import hashlib
 import base64
+import hashlib
 import json
 import os
 import re
+import secrets
 import socket
 import struct
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-# ----- CONFIGURE AQUI -----
-PORT = 8000
-MAX_PLAYERS = 8          # teto por sala (mesmo valor em js/data.js)
-MAX_ROOMS = 32           # quantas salas simultaneas o servidor aguenta
-MAX_CHAT = 180           # caracteres por mensagem
+PORT = int(os.environ.get("PORT", "8000"))
+MAX_PLAYERS = 8
+MAX_ROOMS = 32
+MAX_CHAT = 180
 MAX_NAME = 18
 MAX_ROOM = 8
-RATE_PER_SEC = 20        # teto de mensagens por segundo por jogador
+RATE_PER_SEC = 24
+HTTP_TTL = 12
 ROOT = os.path.dirname(os.path.abspath(__file__))
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-# --------------------------
 
 ROOM_OK = re.compile(r"^[A-Z0-9]{1,8}$")
 NAME_OK = re.compile(r"^[\w \-'.]{1,18}$", re.UNICODE)
@@ -48,15 +39,15 @@ SEATS = ("GM", "P1", "P2", "P3", "P4", "P5", "P6", "P7")
 
 
 class Client:
-    def __init__(self, sock: socket.socket, addr):
+    def __init__(self, cid: str, mode: str, sock=None):
+        self.id = cid
+        self.mode = mode
         self.sock = sock
-        self.addr = addr
-        self.id = f"{addr[0]}-{addr[1]}-{int(time.time() * 1000) % 100000}"
         self.room = None
         self.name = "Jogador"
         self.char_id = "chindu"
-        self.x = 0
-        self.y = 0
+        self.x = 448
+        self.y = 422
         self.dir = "front"
         self.walk_frame = 0
         self.seated = False
@@ -66,6 +57,8 @@ class Client:
         self.last_msg = 0.0
         self.hits = 0
         self.alive = True
+        self.seen = time.time()
+        self.events: list = []
 
     def public(self):
         return {
@@ -90,6 +83,7 @@ class Room:
         self.seats = {s: None for s in SEATS}
         self.locked = False
         self.turn_seat = None
+        self.last_dice = None
 
     def names_in_seats(self):
         out = {s: None for s in SEATS}
@@ -105,8 +99,7 @@ rooms_lock = threading.Lock()
 
 def send_ws(sock: socket.socket, payload: bytes, opcode: int = 1) -> None:
     n = len(payload)
-    header = bytearray()
-    header.append(0x80 | opcode)
+    header = bytearray([0x80 | opcode])
     if n < 126:
         header.append(n)
     elif n < 65536:
@@ -119,7 +112,11 @@ def send_ws(sock: socket.socket, payload: bytes, opcode: int = 1) -> None:
 
 
 def send_json(client: Client, obj: dict) -> None:
-    if not client.alive:
+    if client.mode == "http":
+        if len(client.events) < 40:
+            client.events.append(obj)
+        return
+    if not client.alive or not client.sock:
         return
     try:
         send_ws(client.sock, json.dumps(obj, ensure_ascii=True).encode("utf-8"))
@@ -127,7 +124,20 @@ def send_json(client: Client, obj: dict) -> None:
         client.alive = False
 
 
-def recv_frame(sock: socket.socket) -> tuple[int, bytes] | None:
+def recvn(sock: socket.socket, n: int) -> bytes | None:
+    buf = bytearray()
+    while len(buf) < n:
+        try:
+            chunk = sock.recv(n - len(buf))
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def recv_frame(sock: socket.socket):
     hdr = recvn(sock, 2)
     if not hdr:
         return None
@@ -144,7 +154,7 @@ def recv_frame(sock: socket.socket) -> tuple[int, bytes] | None:
         if not ext:
             return None
         n = struct.unpack("!Q", ext)[0]
-    if n > 4096:
+    if n > 8192:
         return None
     mask = recvn(sock, 4) if masked else b"\x00\x00\x00\x00"
     if mask is None:
@@ -157,52 +167,6 @@ def recv_frame(sock: socket.socket) -> tuple[int, bytes] | None:
     return opcode, data
 
 
-def recvn(sock: socket.socket, n: int) -> bytes | None:
-    buf = bytearray()
-    while len(buf) < n:
-        try:
-            chunk = sock.recv(n - len(buf))
-        except OSError:
-            return None
-        if not chunk:
-            return None
-        buf.extend(chunk)
-    return bytes(buf)
-
-
-def handshake(sock: socket.socket) -> bool:
-    try:
-        sock.settimeout(8)
-        raw = b""
-        while b"\r\n\r\n" not in raw and len(raw) < 4096:
-            chunk = sock.recv(1024)
-            if not chunk:
-                return False
-            raw += chunk
-        text = raw.decode("iso-8859-1", errors="replace")
-        if "Upgrade: websocket" not in text.lower() and "upgrade: websocket" not in text.lower():
-            return False
-        key = ""
-        for line in text.split("\r\n"):
-            if line.lower().startswith("sec-websocket-key:"):
-                key = line.split(":", 1)[1].strip()
-        if not key:
-            return False
-        accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode("ascii")).digest()).decode("ascii")
-        resp = (
-            "HTTP/1.1 101 Switching Protocols\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Accept: {accept}\r\n"
-            "\r\n"
-        )
-        sock.sendall(resp.encode("ascii"))
-        sock.settimeout(30)
-        return True
-    except OSError:
-        return False
-
-
 def rate_ok(client: Client) -> bool:
     now = time.time()
     if now - client.last_msg > 1:
@@ -213,62 +177,74 @@ def rate_ok(client: Client) -> bool:
     return client.hits <= RATE_PER_SEC
 
 
+def snapshot_players(room: Room, skip: Client | None = None) -> list:
+    return [c.public() for c in room.clients.values() if not skip or c.id != skip.id]
+
+
 def broadcast(room: Room, obj: dict, skip: Client | None = None) -> None:
     dead = []
     for c in list(room.clients.values()):
         if skip and c.id == skip.id:
             continue
         send_json(c, obj)
-        if not c.alive:
+        if c.mode == "ws" and not c.alive:
             dead.append(c)
     for c in dead:
         leave_room(c)
 
 
-def snapshot_players(room: Room, skip: Client | None = None) -> list:
-    return [c.public() for c in room.clients.values() if not skip or c.id != skip.id]
-
-
 def join_room(client: Client, room_code: str, name: str, char_id: str) -> str | None:
     with rooms_lock:
         if len(rooms) >= MAX_ROOMS and room_code not in rooms:
-            return "Servidor cheio. Tente outro codigo daqui a pouco."
+            return "Servidor cheio."
         room = rooms.get(room_code)
         if room is None:
             room = Room(room_code)
             rooms[room_code] = room
-        if len(room.clients) >= MAX_PLAYERS:
+        live = [c for c in room.clients.values() if c.mode == "ws" or (time.time() - c.seen) < HTTP_TTL]
+        if len(live) >= MAX_PLAYERS:
             return "Sala cheia (max. %s)." % MAX_PLAYERS
+        n = len(room.clients)
         client.room = room_code
         client.name = name
         client.char_id = char_id if char_id in CHAR_OK else "chindu"
+        client.x = 14 * 32 + (n % 4) * 22
+        client.y = 13 * 32 + (n // 4) * 20
         room.clients[client.id] = client
-        send_json(client, {
+        welcome = {
             "type": "welcome",
             "id": client.id,
             "count": len(room.clients),
             "max": MAX_PLAYERS,
             "players": snapshot_players(room, client),
             "seats": room.names_in_seats(),
-        })
+            "locked": room.locked,
+            "turnSeat": room.turn_seat,
+            "x": client.x,
+            "y": client.y,
+        }
+        send_json(client, welcome)
+        if client.mode == "http":
+            client.events = []
         broadcast(room, {
             "type": "players",
             "count": len(room.clients),
             "max": MAX_PLAYERS,
             "players": snapshot_players(room),
-        })
-        broadcast(room, {"type": "chat", "name": "Sala", "text": name + " entrou.", "kind": "sys"})
+        }, skip=client)
+        broadcast(room, {"type": "chat", "name": "Sala", "text": name + " entrou.", "kind": "sys"}, skip=client)
         return None
 
 
 def leave_room(client: Client) -> None:
     code = client.room
+    client.alive = False
     if not code:
-        client.alive = False
-        try:
-            client.sock.close()
-        except OSError:
-            pass
+        if client.sock:
+            try:
+                client.sock.close()
+            except OSError:
+                pass
         return
     with rooms_lock:
         room = rooms.get(code)
@@ -287,69 +263,78 @@ def leave_room(client: Client) -> None:
                 "max": MAX_PLAYERS,
                 "players": snapshot_players(room),
             })
-            broadcast(room, {"type": "seats", "seats": room.names_in_seats(), "locked": room.locked, "turnSeat": room.turn_seat})
+            broadcast(room, {
+                "type": "seats",
+                "seats": room.names_in_seats(),
+                "locked": room.locked,
+                "turnSeat": room.turn_seat,
+            })
             broadcast(room, {"type": "chat", "name": "Sala", "text": client.name + " saiu.", "kind": "sys"})
-    client.alive = False
-    try:
-        client.sock.close()
-    except OSError:
-        pass
+    if client.sock:
+        try:
+            client.sock.close()
+        except OSError:
+            pass
 
 
-def handle_msg(client: Client, msg: dict) -> None:
+def apply_state(client: Client, msg: dict) -> None:
+    client.x = int(msg.get("x") or client.x)
+    client.y = int(msg.get("y") or client.y)
+    client.dir = str(msg.get("dir") or "front")[:8]
+    client.walk_frame = 1 if msg.get("walkFrame") else 0
+    client.seated = bool(msg.get("seated"))
+    client.seat_id = msg.get("seatId") if msg.get("seatId") in SEATS else None
+    client.map_id = str(msg.get("mapId") or "hall")[:12]
+    pose = msg.get("pose")
+    client.pose = str(pose)[:12] if pose else None
+    client.seen = time.time()
+
+
+def handle_msg(client: Client, msg: dict) -> dict | None:
     if not rate_ok(client):
-        return
+        return None
     kind = msg.get("type")
     if kind == "join" and not client.room:
         room = str(msg.get("room") or "").upper()[:MAX_ROOM]
         name = str(msg.get("name") or "Jogador")[:MAX_NAME]
         char_id = str(msg.get("charId") or "chindu")
         if not ROOM_OK.match(room):
-            send_json(client, {"type": "error", "reason": "Codigo da sala invalido."})
-            return
+            return {"type": "error", "reason": "Codigo da sala invalido."}
         if not NAME_OK.match(name):
-            send_json(client, {"type": "error", "reason": "Nome invalido."})
-            return
+            return {"type": "error", "reason": "Nome invalido."}
         err = join_room(client, room, name, char_id)
         if err:
-            send_json(client, {"type": "full", "reason": err})
-        return
+            return {"type": "full", "reason": err}
+        return None
 
     if not client.room:
-        return
+        return {"type": "error", "reason": "Entre numa sala."}
     with rooms_lock:
         room = rooms.get(client.room)
     if not room:
-        return
+        return {"type": "error", "reason": "Sala sumiu."}
 
     if kind == "state":
-        client.x = int(msg.get("x") or 0)
-        client.y = int(msg.get("y") or 0)
-        client.dir = str(msg.get("dir") or "front")[:8]
-        client.walk_frame = 1 if msg.get("walkFrame") else 0
-        client.seated = bool(msg.get("seated"))
-        client.seat_id = msg.get("seatId") if msg.get("seatId") in SEATS else None
-        client.map_id = str(msg.get("mapId") or "hall")[:12]
-        client.pose = str(msg.get("pose") or "")[:12] or None
-        broadcast(room, {
-            "type": "players",
-            "count": len(room.clients),
-            "max": MAX_PLAYERS,
-            "players": snapshot_players(room),
-        }, skip=client)
-        return
+        apply_state(client, msg)
+        if client.mode == "ws":
+            broadcast(room, {
+                "type": "players",
+                "count": len(room.clients),
+                "max": MAX_PLAYERS,
+                "players": snapshot_players(room),
+            }, skip=client)
+        return None
 
     if kind == "chat":
         text = str(msg.get("text") or "").strip()[:MAX_CHAT]
-        if not text:
-            return
-        broadcast(room, {"type": "chat", "name": client.name, "text": text, "kind": ""})
-        return
+        if text:
+            broadcast(room, {"type": "chat", "name": client.name, "text": text, "kind": ""})
+        return None
 
     if kind == "dice":
         items = msg.get("items")
         if not isinstance(items, list) or not items or len(items) > 4:
-            return
+            return None
         clean = []
         for it in items[:4]:
             if not isinstance(it, dict):
@@ -362,39 +347,45 @@ def handle_msg(client: Client, msg: dict) -> None:
                 "text": str(it.get("text") or "")[:4],
             })
         if clean:
-            # quem rolou ja anima na propria tela; os outros so recebem o resultado
-            broadcast(room, {"type": "dice", "name": client.name, "items": clean}, skip=client)
-        return
+            payload = {"type": "dice", "name": client.name, "from": client.id, "items": clean}
+            room.last_dice = payload
+            broadcast(room, payload, skip=client)
+        return None
 
     if kind == "pose":
         pose = str(msg.get("pose") or "")[:12]
         ms = int(msg.get("ms") or 1800)
         client.pose = pose
         broadcast(room, {"type": "pose", "id": client.id, "pose": pose, "ms": ms}, skip=client)
-        return
+        return None
 
     if kind == "avatar":
         char_id = str(msg.get("charId") or "")
         if char_id in CHAR_OK:
             client.char_id = char_id
-        return
+        return None
 
     if kind == "sit":
         seat = msg.get("seat")
         if seat not in SEATS:
-            return
+            return None
         with rooms_lock:
             taken = room.seats.get(seat)
             if taken and taken != client.id:
-                return
+                return None
             for s, cid in list(room.seats.items()):
                 if cid == client.id:
                     room.seats[s] = None
             room.seats[seat] = client.id
             client.seated = True
             client.seat_id = seat
-            broadcast(room, {"type": "seats", "seats": room.names_in_seats(), "locked": room.locked, "turnSeat": room.turn_seat})
-        return
+            broadcast(room, {
+                "type": "seats",
+                "seats": room.names_in_seats(),
+                "locked": room.locked,
+                "turnSeat": room.turn_seat,
+            })
+        return None
 
     if kind == "stand":
         with rooms_lock:
@@ -403,33 +394,76 @@ def handle_msg(client: Client, msg: dict) -> None:
                     room.seats[s] = None
             client.seated = False
             client.seat_id = None
-            broadcast(room, {"type": "seats", "seats": room.names_in_seats(), "locked": room.locked, "turnSeat": room.turn_seat})
-        return
+            broadcast(room, {
+                "type": "seats",
+                "seats": room.names_in_seats(),
+                "locked": room.locked,
+                "turnSeat": room.turn_seat,
+            })
+        return None
 
     if kind == "lock":
         if room.seats.get("GM") != client.id:
-            return
+            return None
         room.locked = bool(msg.get("locked"))
-        broadcast(room, {"type": "seats", "seats": room.names_in_seats(), "locked": room.locked, "turnSeat": room.turn_seat})
-        return
+        broadcast(room, {
+            "type": "seats",
+            "seats": room.names_in_seats(),
+            "locked": room.locked,
+            "turnSeat": room.turn_seat,
+        })
+        return None
 
     if kind == "turn":
         if room.seats.get("GM") != client.id:
-            return
+            return None
         seat = msg.get("seat")
         if seat in SEATS:
             room.turn_seat = seat
-            broadcast(room, {"type": "seats", "seats": room.names_in_seats(), "locked": room.locked, "turnSeat": room.turn_seat})
+            broadcast(room, {
+                "type": "seats",
+                "seats": room.names_in_seats(),
+                "locked": room.locked,
+                "turnSeat": room.turn_seat,
+            })
+    return None
 
 
-def client_loop(sock: socket.socket, addr) -> None:
-    client = Client(sock, addr)
-    if not handshake(sock):
-        try:
-            sock.close()
-        except OSError:
-            pass
+def prune_http() -> None:
+    now = time.time()
+    with rooms_lock:
+        stale = []
+        for room in list(rooms.values()):
+            for c in list(room.clients.values()):
+                if c.mode == "http" and now - c.seen > HTTP_TTL:
+                    stale.append(c)
+        for c in stale:
+            leave_room(c)
+
+
+def ws_session(handler: SimpleHTTPRequestHandler) -> None:
+    key = handler.headers.get("Sec-WebSocket-Key", "")
+    if not key:
+        handler.send_error(400)
         return
+    accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode("ascii")).digest()).decode("ascii")
+    handler.protocol_version = "HTTP/1.1"
+    handler.close_connection = True
+    handler.send_response(101, "Switching Protocols")
+    handler.send_header("Upgrade", "websocket")
+    handler.send_header("Connection", "Upgrade")
+    handler.send_header("Sec-WebSocket-Accept", accept)
+    handler.end_headers()
+    try:
+        handler.wfile.flush()
+    except OSError:
+        return
+    sock = handler.connection
+    try:
+        sock.settimeout(40)
+    except OSError:
+        pass
+    client = Client("w-" + secrets.token_hex(6), "ws", sock)
     try:
         while client.alive:
             frame = recv_frame(sock)
@@ -448,12 +482,111 @@ def client_loop(sock: socket.socket, addr) -> None:
             except (ValueError, UnicodeDecodeError):
                 continue
             if isinstance(msg, dict):
-                handle_msg(client, msg)
+                extra = handle_msg(client, msg)
+                if extra:
+                    send_json(client, extra)
     finally:
         leave_room(client)
 
 
-class StaticHandler(SimpleHTTPRequestHandler):
+def read_json_body(handler: SimpleHTTPRequestHandler) -> dict | None:
+    try:
+        n = int(handler.headers.get("Content-Length") or "0")
+    except ValueError:
+        n = 0
+    if n <= 0 or n > 8192:
+        return None
+    raw = handler.rfile.read(n)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_json(handler: SimpleHTTPRequestHandler, obj: dict, code: int = 200) -> None:
+    body = json.dumps(obj, ensure_ascii=True).encode("utf-8")
+    handler.send_response(code)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def find_http_client(cid: str) -> Client | None:
+    with rooms_lock:
+        for room in rooms.values():
+            c = room.clients.get(cid)
+            if c and c.mode == "http":
+                return c
+    return None
+
+
+def http_join(payload: dict) -> dict:
+    prune_http()
+    client = Client("h-" + secrets.token_hex(6), "http")
+    extra = handle_msg(client, {
+        "type": "join",
+        "room": payload.get("room"),
+        "name": payload.get("name"),
+        "charId": payload.get("charId"),
+    })
+    if extra:
+        return extra
+    with rooms_lock:
+        room = rooms.get(client.room)
+        players = snapshot_players(room, client) if room else []
+        seats = room.names_in_seats() if room else {}
+        count = len(room.clients) if room else 1
+    return {
+        "type": "welcome",
+        "id": client.id,
+        "count": count,
+        "max": MAX_PLAYERS,
+        "players": players,
+        "seats": seats,
+        "locked": room.locked if room else False,
+        "turnSeat": room.turn_seat if room else None,
+        "x": client.x,
+        "y": client.y,
+    }
+
+
+def http_sync(payload: dict) -> dict:
+    prune_http()
+    cid = str(payload.get("id") or "")
+    client = find_http_client(cid)
+    if not client:
+        return {"type": "error", "reason": "Sessao expirada. Entre de novo."}
+    state = payload.get("state")
+    if isinstance(state, dict):
+        state = dict(state)
+        state["type"] = "state"
+        handle_msg(client, state)
+    event = payload.get("event")
+    if isinstance(event, dict) and event.get("type") and event.get("type") != "state":
+        handle_msg(client, event)
+    with rooms_lock:
+        room = rooms.get(client.room)
+        if not room:
+            return {"type": "error", "reason": "Sala sumiu."}
+        events = client.events
+        client.events = []
+        return {
+            "type": "sync",
+            "id": client.id,
+            "count": len(room.clients),
+            "max": MAX_PLAYERS,
+            "players": snapshot_players(room, client),
+            "seats": room.names_in_seats(),
+            "locked": room.locked,
+            "turnSeat": room.turn_seat,
+            "events": events,
+        }
+
+
+class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=ROOT, **kwargs)
 
@@ -466,34 +599,40 @@ class StaticHandler(SimpleHTTPRequestHandler):
         self.send_header("X-Frame-Options", "SAMEORIGIN")
         super().end_headers()
 
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.end_headers()
 
-class DualServer(ThreadingHTTPServer):
-    daemon_threads = True
-
-    def process_request(self, request, client_address):
-        try:
-            peek = request.recv(8, socket.MSG_PEEK)
-        except OSError:
-            request.close()
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/ws" and (self.headers.get("Upgrade") or "").lower() == "websocket":
+            ws_session(self)
             return
-        if peek[:3] == b"GET":
-            try:
-                head = request.recv(1024, socket.MSG_PEEK)
-            except OSError:
-                request.close()
-                return
-            if b"Upgrade: websocket" in head or b"upgrade: websocket" in head:
-                t = threading.Thread(target=client_loop, args=(request, client_address), daemon=True)
-                t.start()
-                return
-        super().process_request(request, client_address)
+        if path == "/api/health":
+            write_json(self, {"ok": True, "max": MAX_PLAYERS})
+            return
+        super().do_GET()
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        payload = read_json_body(self) or {}
+        if path == "/api/join":
+            write_json(self, http_join(payload))
+            return
+        if path == "/api/sync":
+            write_json(self, http_sync(payload))
+            return
+        self.send_error(404)
 
 
 def main() -> None:
     os.chdir(ROOT)
-    httpd = DualServer(("0.0.0.0", PORT), StaticHandler)
+    httpd = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print("Broken Mirror RPG  http://127.0.0.1:%s" % PORT, flush=True)
-    print("WebSocket em /ws   max %s jogadores por sala" % MAX_PLAYERS, flush=True)
+    print("WS /ws  HTTP /api/join /api/sync  max %s" % MAX_PLAYERS, flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
