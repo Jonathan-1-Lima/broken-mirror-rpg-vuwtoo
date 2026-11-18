@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0a10">
+  <title>Broken Mirror RPG</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Source+Sans+3:ital,wght@0,400;0,600;0,700;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <!-- Camadas de atmosfera (nao bloqueiam clique) -->
+  <div id="grain"></div>
+  <div id="vignette"></div>
+
+  <!-- ===================== TELA 1: INICIO ===================== -->
+  <section id="landing" class="screen active">
+    <div class="shards" aria-hidden="true">
+      <span class="shard s1"></span>
+      <span class="shard s2"></span>
+      <span class="shard s3"></span>
+      <span class="shard s4"></span>
+      <span class="shard s5"></span>
+      <span class="shard s6"></span>
+      <span class="dust d1"></span>
+      <span class="dust d2"></span>
+      <span class="dust d3"></span>
+    </div>
+    <header class="landing-head">
+      <p class="eyebrow">RPG de mesa digital em 2D</p>
+      <h1>Broken <span class="mirror">Mirror</span> RPG</h1>
+      <p class="tagline">Um mundo jogavel nascido das ideias e dos desenhos de uma crianca.</p>
+    </header>
+    <div class="landing-actions">
+      <button class="btn primary" id="btn-enter" type="button">Entrar no mundo</button>
+      <button class="btn ghost" id="btn-story" type="button">A origem</button>
+    </div>
+    <dl class="credits">
+      <div><dt>Personagens</dt><dd>VuwToo - Kalleby - Meu filho</dd></div>
+      <div><dt>Adaptacao chibi</dt><dd>IA a partir dos originais</dd></div>
+      <div><dt>Sistema</dt><dd>Jonathan Lima</dd></div>
+    </dl>
+    <p class="legal-links">
+      <a href="TERMS.md">Termos de uso</a>
+      <a href="LICENSE">Licenca</a>
+      
+    </p>
+  </section>
+
+  <!-- ===================== TELA 2: ORIGEM ===================== -->
+  <section id="story" class="screen">
+    <article class="story-card">
+      <p class="eyebrow">Origem do projeto</p>
+      <h2>Espelhos, tinta e imaginacao</h2>
+      <p>Broken Mirror RPG e um projeto de RPG de mesa digital em 2D, inspirado em experiencias como Gather Town e em sessoes presenciais ao redor da mesa.</p>
+      <p>Foi criado com foco em interacao, narrativa e acessibilidade: jogadores se movimentam pelos mapas, interagem com objetos e participam de sessoes de forma visual e intuitiva.</p>
+      <p>Os conceitos, personagens e desenhos originais vieram do meu filho. A partir disso nasceu a ideia de transformar essas criacoes em um jogo vivo. Alguns desenhos foram adaptados para versoes chibi com auxilio de IA, sempre respeitando o design original.</p>
+      <blockquote>Transformar historias e personagens criados por uma crianca em um mundo jogavel, divertido e cheio de possibilidades.</blockquote>
+      <div class="story-actions">
+        <button class="btn primary" id="btn-story-play" type="button">Jogar agora</button>
+        <button class="btn ghost" id="btn-story-back" type="button">Voltar</button>
+      </div>
+    </article>
+  </section>
+
+  <!-- ===================== TELA 3: ESCOLHA DE PERSONAGEM ===================== -->
+  <section id="select" class="screen">
+    <div class="select-wrap">
+      <p class="eyebrow">Escolha seu reflexo</p>
+      <h2>Quem vai atravessar o espelho?</h2>
+      <!-- Os cards sao criados em js/ui.js a partir de CHARACTERS -->
+      <div id="char-grid" class="char-grid"></div>
+      <label class="name-field">
+        <span>Seu nome na mesa</span>
+        <input id="player-name" type="text" maxlength="18" placeholder="Digite um nome" autocomplete="off">
+      </label>
+      <!-- Codigo da sala: quem digitar o mesmo entra no mesmo mundo. Max. de gente: MAX_PLAYERS em js/data.js e server.py -->
+      <label class="name-field">
+        <span>Codigo da sala (compartilhe com a mesa)</span>
+        <input id="room-code" type="text" maxlength="8" value="MIRROR" placeholder="MIRROR" autocomplete="off" spellcheck="false">
+      </label>
+      <p class="room-hint">Ate 8 pessoas no mesmo codigo. Sem codigo, voce joga sozinho.</p>
+      <button class="btn primary" id="btn-start" type="button" disabled>Entrar na sala principal</button>
+    </div>
+  </section>
+
+  <!-- ===================== TELA 4: JOGO (CANVAS 2D) ===================== -->
+  <section id="game" class="screen">
+    <canvas id="world"></canvas>
+
+    <div id="hud">
+      <div class="hud-left">
+        <div id="hud-char"></div>
+        <div>
+          <strong id="hud-name">-</strong>
+          <span id="hud-map">Sala Principal</span>
+          <span id="hud-room" class="hud-room"></span>
+        </div>
+      </div>
+      <div class="hud-right">
+        <button class="icon-btn" id="btn-chat" type="button">Chat</button>
+        <button class="icon-btn" id="btn-emotes" type="button">Emotes</button>
+        <button class="icon-btn" id="btn-help" type="button">Ajuda</button>
+      </div>
+    </div>
+
+    <div id="prompt" class="hidden"></div>
+    <div id="toast" class="hidden"></div>
+    <div id="emote-bubble" class="hidden"></div>
+
+    <!-- Chat local de mensagens (Enter abre, Esc fecha) -->
+    <aside id="chat-dock" class="chat-dock closed">
+      <div class="chat-head">
+        <strong>Chat</strong>
+        <button class="icon-btn" id="btn-chat-toggle" type="button">Abrir</button>
+      </div>
+      <div id="chat-messages" class="chat-messages"></div>
+      <form id="chat-form" class="chat-form">
+        <input id="chat-input" type="text" maxlength="180" placeholder="Digite uma mensagem..." autocomplete="off">
+        <button class="btn compact primary" type="submit">Enviar</button>
+      </form>
+    </aside>
+
+    <aside id="emote-bar" class="hidden">
+      <p>Poses</p>
+      <div id="emote-list"></div>
+    </aside>
+
+    <!-- Painel da mesa (sistema do primeiro site, visual deste estilo) -->
+    <aside id="table-panel" class="hidden">
+      <h3>Mesa de RPG</h3>
+      <div class="table-meta">
+        <div>Seu assento: <b id="my-seat-label">nenhum</b></div>
+        <div>Mestre: <b id="gm-label">ninguem</b></div>
+      </div>
+      <div id="seats-grid" class="seats-grid"></div>
+      <div class="dice-tray">
+        <div class="dice-title">Dados <span>toque para montar (max. 4)</span></div>
+        <div id="dice-kinds" class="dice-kinds"></div>
+        <div id="dice-pool" class="dice-pool"></div>
+      </div>
+      <div class="table-actions">
+        <button class="btn compact ghost" id="btn-leave-seat" type="button">Levantar</button>
+        <button class="btn compact ghost" id="btn-clear-dice" type="button">Limpar</button>
+        <button class="btn compact primary" id="btn-roll-dice" type="button">Rolar</button>
+      </div>
+      <!-- Resultado: um numero por dado, sem soma. Troque o titulo abaixo se quiser. -->
+      <div class="dice-box">
+        <div class="dice-title">Cada dado</div>
+        <div id="dice-panel-result" class="dice-results"></div>
+      </div>
+      <!-- So aparece se voce for o Mestre -->
+      <div id="gm-area" class="hidden">
+        <h4>Area do Mestre</h4>
+        <div class="table-actions">
+          <button class="btn compact" id="btn-lock" type="button">Travar mesa</button>
+          <button class="btn compact ghost" id="btn-unlock" type="button">Destravar</button>
+        </div>
+        <label class="turn-field">
+          <span>Liberar vez para</span>
+          <select id="turn-select"></select>
+        </label>
+        <button class="btn compact primary" id="btn-grant-turn" type="button">Liberar vez</button>
+      </div>
+      <button class="btn compact ghost" id="btn-close-table" type="button">Fechar</button>
+    </aside>
+
+    <div id="dice-layer" class="hidden">
+      <div class="dice-stage">
+        <div id="dice-row" class="dice-row"></div>
+        <p id="dice-label">rolando...</p>
+      </div>
+    </div>
+
+    <div id="help-card" class="hidden">
+      <h3>Controles</h3>
+      <ul>
+        <li><kbd>WASD</kbd> ou setas para andar</li>
+        <li><kbd>E</kbd> interagir / mesa / porta / bots / espelho</li>
+        <li><kbd>R</kbd> rolar os dados da mesa (quando for sua vez)</li>
+        <li><kbd>Enter</kbd> abrir o chat</li>
+        <li><kbd>1-6</kbd> poses (oi, amor, pensar, vitoria, raiva, respeito)</li>
+        <li><kbd>F1</kbd> modo debug</li>
+        <li>No celular: joystick + botao E</li>
+      </ul>
+      <button class="btn compact" id="btn-help-close" type="button">Fechar</button>
+    </div>
+
+    <div id="debug" class="hidden">
+      <span>DEBUG F1</span>
+      <span id="debug-info"></span>
+    </div>
+
+    <div id="mobile">
+      <div id="stick" class="stick">
+        <div id="knob"></div>
+      </div>
+      <div class="mobile-actions">
+        <button id="btn-emote-mobile" type="button">Emote</button>
+        <button id="btn-action" type="button">E</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Ordem importa: dados -> desenho -> mapas -> teclado -> canvas -> mesa -> rede -> telas -> jogo -->
+  <script src="js/data.js"></script>
+  <script src="js/sprites.js"></script>
+  <script src="js/maps.js"></script>
+  <script src="js/input.js"></script>
+  <script src="js/engine.js"></script>
+  <script src="js/table.js"></script>
+  <script src="js/net.js"></script>
+  <script src="js/ui.js"></script>
+  <script src="js/game.js"></script>
+</body>
+</html>
