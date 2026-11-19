@@ -329,7 +329,13 @@ def handle_msg(client: Client, msg: dict) -> dict | None:
     if kind == "chat":
         text = str(msg.get("text") or "").strip()[:MAX_CHAT]
         if text:
-            broadcast(room, {"type": "chat", "name": client.name, "text": text, "kind": ""})
+            broadcast(room, {
+                "type": "chat",
+                "name": client.name,
+                "text": text,
+                "kind": "",
+                "from": client.id,
+            })
         return None
 
     if kind == "dice":
@@ -554,6 +560,14 @@ def http_join(payload: dict) -> dict:
     }
 
 
+def http_leave(payload: dict) -> dict:
+    cid = str(payload.get("id") or "")
+    client = find_http_client(cid)
+    if client:
+        leave_room(client)
+    return {"ok": True}
+
+
 def http_sync(payload: dict) -> dict:
     prune_http()
     cid = str(payload.get("id") or "")
@@ -565,9 +579,24 @@ def http_sync(payload: dict) -> dict:
         state = dict(state)
         state["type"] = "state"
         handle_msg(client, state)
+    incoming = payload.get("events")
+    if not isinstance(incoming, list):
+        incoming = []
     event = payload.get("event")
-    if isinstance(event, dict) and event.get("type") and event.get("type") != "state":
-        handle_msg(client, event)
+    if isinstance(event, dict):
+        incoming = [event] + incoming
+    seen = set()
+    for ev in incoming:
+        if not isinstance(ev, dict):
+            continue
+        kind = ev.get("type")
+        if not kind or kind == "state":
+            continue
+        key = kind + ":" + str(ev.get("text") or ev.get("seat") or ev.get("pose") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        handle_msg(client, ev)
     with rooms_lock:
         room = rooms.get(client.room)
         if not room:
@@ -625,6 +654,9 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path == "/api/sync":
             write_json(self, http_sync(payload))
+            return
+        if path == "/api/leave":
+            write_json(self, http_leave(payload))
             return
         self.send_error(404)
 
