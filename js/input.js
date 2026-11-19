@@ -15,12 +15,12 @@ const input = {
 function bindKeyboard() {
   window.addEventListener("keydown", (e) => {
     input.keys[e.code] = true;
-    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) {
+    const tag = (e.target && e.target.tagName) || "";
+    const typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+    if (!typing && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) {
       e.preventDefault();
     }
-    /* Se estiver digitando no chat/nome, nao captura o resto */
-    const tag = (e.target && e.target.tagName) || "";
-    if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+    if (typing) return;
 
     if (e.code === "KeyE") queueAction();
     if (e.code === "KeyR" && window.tableSystem) tableSystem.tryRoll();
