@@ -122,8 +122,9 @@ function bindChat() {
     e.preventDefault();
     const text = inputEl.value.trim();
     if (!text) return;
+    addChatMessage(game.displayName || "Voce", text);
     if (window.net && net.connected) net.send({ type: "chat", text: text });
-    else addChatMessage(game.displayName || "Voce", text);
+    if (typeof bumpActive === "function") bumpActive();
     inputEl.value = "";
   });
 }
