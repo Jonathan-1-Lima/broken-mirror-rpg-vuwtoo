@@ -83,13 +83,18 @@ function renderTableUI() {
   });
 
   const sel = $("turn-select");
-  sel.innerHTML = "";
-  SEAT_ORDER.forEach((id) => {
-    const opt = document.createElement("option");
-    opt.value = id;
-    opt.textContent = id + (tableSystem.seats[id] ? " (" + tableSystem.seats[id] + ")" : " vazio");
-    sel.appendChild(opt);
-  });
+  if (document.activeElement !== sel) {
+    const keep = sel.value;
+    sel.innerHTML = "";
+    SEAT_ORDER.forEach((id) => {
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = id + (tableSystem.seats[id] ? " (" + tableSystem.seats[id] + ")" : " vazio");
+      sel.appendChild(opt);
+    });
+    const pick = keep || tableSystem.turnSeat || "";
+    if (pick && Array.from(sel.options).some((o) => o.value === pick)) sel.value = pick;
+  }
 }
 
 function openTablePanel() {
