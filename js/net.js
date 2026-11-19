@@ -12,13 +12,17 @@ window.net = {
   room: "",
   lastSent: 0,
   pollTimer: 0,
-  pending: null,
+  queue: [],
   seenDice: "",
   joinName: "",
-  joinChar: ""
+  joinChar: "",
+  lastActive: 0,
+  idleTimer: 0,
+  leaving: false
 };
 
 var net = window.net;
+var IDLE_MS = 5 * 60 * 1000;
 
 function netUrl() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -34,6 +38,10 @@ function othersOf(list) {
   return (list || []).filter((p) => p && p.id && p.id !== net.id);
 }
 
+function bumpActive() {
+  net.lastActive = Date.now();
+}
+
 net.send = function (obj) {
   if (!obj) return;
   if (net.mode === "ws" && net.ws && net.ws.readyState === 1) {
@@ -42,7 +50,7 @@ net.send = function (obj) {
     } catch (err) { /* onclose trata */ }
     return;
   }
-  if (net.mode === "http" && obj.type !== "state") net.pending = obj;
+  if (obj.type !== "state") net.queue.push(obj);
 };
 
 net.tick = function () {
@@ -72,23 +80,32 @@ net.snapshot = function () {
 };
 
 function applyRemoteList(list) {
+  const prevList = engine.remotes || [];
   engine.remotes = othersOf(list).map((r) => {
-    const prev = (engine.remotes || []).find((p) => p.id === r.id) || {};
+    const prev = prevList.find((p) => p.id === r.id) || {};
     let sheet = prev.sheet;
     try {
       sheet = sheet || sheetForChar(r.charId);
     } catch (err) {
       sheet = prev.sheet;
     }
+    const first = !prev.id;
+    const mapChange = !!(prev.mapId && prev.mapId !== r.mapId);
+    const seated = !!r.seated;
+    const snap = first || mapChange || seated || prev.seated !== seated;
+    const x = snap || prev.x == null ? r.x : prev.x;
+    const y = snap || prev.y == null ? r.y : prev.y;
     return {
       id: r.id,
       name: r.name,
       charId: r.charId,
-      x: r.x,
-      y: r.y,
-      dir: r.dir || "front",
-      walkFrame: r.walkFrame || 0,
-      seated: !!r.seated,
+      x: x,
+      y: y,
+      tx: r.x,
+      ty: r.y,
+      dir: r.dir || prev.dir || "front",
+      walkFrame: prev.walkFrame || 0,
+      seated: seated,
       seatId: r.seatId,
       mapId: r.mapId || "hall",
       pose: r.pose || prev.pose,
@@ -99,10 +116,22 @@ function applyRemoteList(list) {
 }
 
 function applySeats(seats, locked, turnSeat) {
-  if (seats) tableSystem.seats = Object.assign(tableSystem.seats, seats);
-  if (locked != null) tableSystem.locked = locked;
-  if (turnSeat !== undefined) tableSystem.turnSeat = turnSeat;
-  if (tableSystem.panelOpen) renderTableUI();
+  let changed = false;
+  if (seats) {
+    SEAT_ORDER.forEach((id) => {
+      if (tableSystem.seats[id] !== seats[id]) changed = true;
+    });
+    tableSystem.seats = Object.assign(tableSystem.seats, seats);
+  }
+  if (locked != null && tableSystem.locked !== locked) {
+    tableSystem.locked = locked;
+    changed = true;
+  }
+  if (turnSeat !== undefined && tableSystem.turnSeat !== turnSeat) {
+    tableSystem.turnSeat = turnSeat;
+    changed = true;
+  }
+  if (changed && tableSystem.panelOpen) renderTableUI();
 }
 
 function applyDice(msg) {
@@ -120,6 +149,8 @@ function onNetMessage(msg) {
   if (msg.type === "welcome") {
     net.id = msg.id;
     net.connected = true;
+    net.leaving = false;
+    bumpActive();
     netLabel("sala " + net.room + "  " + msg.count + "/" + (msg.max || MAX_PLAYERS));
     applyRemoteList(msg.players);
     applySeats(msg.seats, msg.locked, msg.turnSeat);
@@ -148,7 +179,12 @@ function onNetMessage(msg) {
     return;
   }
   if (msg.type === "chat") {
+    if (msg.from && msg.from === net.id) return;
     addChatMessage(msg.name, msg.text, msg.kind || "");
+    const dock = document.getElementById("chat-dock");
+    if (dock && dock.classList.contains("closed") && msg.kind !== "sys") {
+      toast(msg.name + ": " + msg.text, 2800);
+    }
     return;
   }
   if (msg.type === "dice") {
@@ -172,7 +208,7 @@ function onNetMessage(msg) {
     toast(msg.reason || "Nao foi possivel entrar.");
     if (msg.reason && msg.reason.indexOf("expirada") >= 0) {
       net.connected = false;
-      if (net.room && net.joinName) joinHttp(net.room, net.joinName, net.joinChar);
+      if (net.room && net.joinName && !net.leaving) joinHttp(net.room, net.joinName, net.joinChar);
     }
   }
 }
@@ -191,12 +227,11 @@ function startPoll() {
     net.pollTimer = 0;
   }
   if (net.mode === "ws" && net.connected) return;
+  if (net.leaving) return;
   net.mode = "http";
-  const body = { id: net.id, state: net.snapshot() };
-  if (net.pending) {
-    body.event = net.pending;
-    net.pending = null;
-  }
+  const events = net.queue.splice(0, 8);
+  const body = { id: net.id, state: net.snapshot(), events: events };
+  if (events.length) body.event = events[0];
   postApi("/api/sync", body, (msg) => {
     if (!msg) {
       netLabel("sala " + net.room + " (offline)");
@@ -204,7 +239,7 @@ function startPoll() {
       return;
     }
     onNetMessage(msg);
-    net.pollTimer = setTimeout(startPoll, 220);
+    net.pollTimer = setTimeout(startPoll, 150);
   });
 }
 
@@ -221,6 +256,68 @@ function joinHttp(room, name, charId) {
   });
 }
 
+function beaconLeave() {
+  if (!net.id) return;
+  try {
+    const body = JSON.stringify({ id: net.id });
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon("/api/leave", new Blob([body], { type: "application/json" }));
+    } else {
+      fetch("/api/leave", { method: "POST", headers: { "Content-Type": "application/json" }, body: body, keepalive: true });
+    }
+  } catch (err) { /* ok */ }
+}
+
+net.disconnect = function (toMenu, reason) {
+  if (net.leaving) return;
+  net.leaving = true;
+  beaconLeave();
+  net.connected = false;
+  net.id = null;
+  net.queue = [];
+  if (net.pollTimer) {
+    clearTimeout(net.pollTimer);
+    net.pollTimer = 0;
+  }
+  if (net.ws) {
+    try { net.ws.close(); } catch (err) { /* ok */ }
+    net.ws = null;
+  }
+  engine.remotes = [];
+  netLabel("solo");
+  if (toMenu) {
+    engine.running = false;
+    if (window.tableSystem) tableSystem.closePanel();
+    if (window.game && game.closeChat) game.closeChat();
+    showScreen("landing");
+    toast(reason || "Voce saiu da sala.");
+  }
+};
+
+function checkIdle() {
+  if (!net.connected || !engine.player || net.leaving) return;
+  if (engine.player.seated) {
+    bumpActive();
+    return;
+  }
+  if (Date.now() - net.lastActive > IDLE_MS) {
+    net.disconnect(true, "Tempo esgotado. Voce ficou parado e saiu da sala.");
+  }
+}
+
+function bindNetLifecycle() {
+  if (net._life) return;
+  net._life = true;
+  window.addEventListener("pagehide", function () { net.disconnect(false); });
+  window.addEventListener("beforeunload", function () { net.disconnect(false); });
+  window.addEventListener("keydown", bumpActive, { passive: true });
+  window.addEventListener("pointerdown", bumpActive, { passive: true });
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) bumpActive();
+  });
+  net.idleTimer = setInterval(checkIdle, 4000);
+}
+
 net.join = function (room, name, charId) {
   net.room = (room || "").replace(/[^A-Z0-9]/gi, "").slice(0, 8).toUpperCase();
   net.joinName = name || "Jogador";
@@ -230,8 +327,12 @@ net.join = function (room, name, charId) {
     return;
   }
   net.connected = false;
+  net.leaving = false;
   net.id = null;
   net.mode = "";
+  net.queue = [];
+  bumpActive();
+  bindNetLifecycle();
   if (net.pollTimer) {
     clearTimeout(net.pollTimer);
     net.pollTimer = 0;
@@ -272,6 +373,7 @@ net.join = function (room, name, charId) {
     onNetMessage(msg);
   };
   ws.onclose = function () {
+    if (net.leaving) return;
     if (net.mode === "ws") {
       net.connected = false;
       engine.remotes = [];
