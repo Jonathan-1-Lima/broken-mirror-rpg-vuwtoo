@@ -123,15 +123,18 @@ function applySeats(seats, locked, turnSeat) {
     });
     tableSystem.seats = Object.assign(tableSystem.seats, seats);
   }
-  if (locked != null && tableSystem.locked !== locked) {
+  const pending = net.queue || [];
+  const pendingLock = pending.some((e) => e && e.type === "lock");
+  const pendingTurn = pending.some((e) => e && e.type === "turn");
+  if (locked != null && tableSystem.locked !== locked && !pendingLock) {
     tableSystem.locked = locked;
     changed = true;
   }
-  if (turnSeat !== undefined && tableSystem.turnSeat !== turnSeat) {
+  if (turnSeat !== undefined && tableSystem.turnSeat !== turnSeat && !pendingTurn) {
     tableSystem.turnSeat = turnSeat;
     changed = true;
   }
-  if (changed && tableSystem.panelOpen) renderTableUI();
+  if (changed) renderTableUI();
 }
 
 function applyDice(msg) {

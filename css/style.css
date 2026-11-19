@@ -463,6 +463,7 @@ h1 .mirror::after {
 .seat-btn.occupied { background: #2a2430; }
 .seat-btn.me { outline: 2px solid #2b7cff; }
 .seat-btn.gm { outline: 2px solid var(--amber); }
+.seat-btn.turn { outline: 2px solid #4dff88; }
 .table-actions { display: flex; gap: .4rem; flex-wrap: wrap; }
 .dice-tray {
   background: #0b0a10;

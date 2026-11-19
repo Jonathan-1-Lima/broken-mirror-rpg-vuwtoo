@@ -22,6 +22,7 @@ const tableSystem = {
   panelOpen: false,      /* painel visivel? */
   pool: ["d20"],         /* ids dos dados montados (max MAX_DICE) */
   lastRoll: null,        /* ultimo resultado: lista de cada dado (sem soma) */
+  pickSeat: "",          /* assento escolhido no select do mestre */
   /* quem esta em cada cadeira (nome do jogador ou null) */
   seats: { GM: null, P1: null, P2: null, P3: null, P4: null, P5: null, P6: null, P7: null }
 };
@@ -40,10 +41,12 @@ function isGM() {
 
 function canRoll() {
   if (!tableSystem.mySeat || tableSystem.rolling) return false;
-  if (tableSystem.locked && !isGM()) return false;
-  /* Mestre pode rolar sempre. Jogador so quando a vez for dele. */
   if (isGM() && !tableSystem.turnSeat) return true;
   return tableSystem.turnSeat === tableSystem.mySeat;
+}
+
+function tableLockedForMe() {
+  return !!(tableSystem.locked && tableSystem.mySeat && !isGM());
 }
 
 function nearTable() {
@@ -63,8 +66,19 @@ function nearTable() {
 function renderTableUI() {
   $("my-seat-label").textContent = tableSystem.mySeat || "nenhum";
   $("gm-label").textContent = tableSystem.seats.GM || "ninguem";
+  const turnEl = $("turn-label");
+  if (turnEl) {
+    const who = tableSystem.turnSeat ? tableSystem.seats[tableSystem.turnSeat] : null;
+    turnEl.textContent = tableSystem.turnSeat
+      ? (tableSystem.turnSeat + (who ? " (" + who + ")" : ""))
+      : "ninguem";
+  }
+  const lockEl = $("lock-label");
+  if (lockEl) lockEl.textContent = tableSystem.locked ? "travada" : "aberta";
   $("gm-area").classList.toggle("hidden", !isGM());
   $("btn-roll-dice").disabled = !canRoll() || !tableSystem.pool.length;
+  const leaveBtn = $("btn-leave-seat");
+  if (leaveBtn) leaveBtn.disabled = tableLockedForMe();
   renderDiceTray();
 
   const grid = $("seats-grid");
@@ -78,13 +92,14 @@ function renderTableUI() {
     if (who) btn.classList.add("occupied");
     if (tableSystem.mySeat === id) btn.classList.add("me");
     if (id === "GM") btn.classList.add("gm");
+    if (tableSystem.turnSeat === id) btn.classList.add("turn");
     btn.addEventListener("click", () => sitOnSeat(id));
     grid.appendChild(btn);
   });
 
   const sel = $("turn-select");
-  if (document.activeElement !== sel) {
-    const keep = sel.value;
+  if (sel && document.activeElement !== sel) {
+    const keep = tableSystem.pickSeat || sel.value;
     sel.innerHTML = "";
     SEAT_ORDER.forEach((id) => {
       const opt = document.createElement("option");
@@ -109,6 +124,10 @@ function closeTablePanel() {
 }
 
 function sitOnSeat(seatId) {
+  if (tableLockedForMe() && tableSystem.mySeat !== seatId) {
+    toast("A mesa esta travada. Voce fica no assento.");
+    return;
+  }
   if (tableSystem.locked && !isGM() && tableSystem.mySeat !== seatId) {
     toast("A mesa esta travada pelo mestre.");
     return;
@@ -142,6 +161,10 @@ function sitOnSeat(seatId) {
 }
 
 function standUp() {
+  if (tableLockedForMe()) {
+    toast("A mesa esta travada. So emotes ate o mestre destravar.");
+    return;
+  }
   const p = engine.player;
   const seat = (engine.map.seats || []).find((s) => s.id === p.seatId);
   if (seat) seat.occupied = false;
@@ -359,10 +382,13 @@ function bindTableUI() {
   renderDiceTray();
   showDiceResults([]);
   $("btn-lock").addEventListener("click", () => {
-    if (!isGM()) return;
+    if (!isGM()) {
+      toast("Sente no lugar do Mestre para travar a mesa.");
+      return;
+    }
     tableSystem.locked = true;
     renderTableUI();
-    toast("Mesa travada.");
+    toast("Mesa travada. Jogadores ficam no assento (so emotes).");
     if (window.net && net.connected) net.send({ type: "lock", locked: true });
   });
   $("btn-unlock").addEventListener("click", () => {
@@ -372,16 +398,27 @@ function bindTableUI() {
     toast("Mesa destrava.");
     if (window.net && net.connected) net.send({ type: "lock", locked: false });
   });
+  const turnSel = $("turn-select");
+  if (turnSel) {
+    turnSel.addEventListener("change", () => {
+      tableSystem.pickSeat = turnSel.value;
+    });
+  }
   $("btn-grant-turn").addEventListener("click", () => {
     if (!isGM()) return;
-    const seat = $("turn-select").value;
+    const seat = tableSystem.pickSeat || $("turn-select").value;
+    if (!seat) {
+      toast("Escolha um assento.");
+      return;
+    }
     if (!tableSystem.seats[seat]) {
       toast("Esse assento esta vazio.");
       return;
     }
+    tableSystem.pickSeat = seat;
     tableSystem.turnSeat = seat;
     renderTableUI();
-    toast("Vez liberada: " + seat);
+    toast("Vez liberada: " + seat + " (" + tableSystem.seats[seat] + ")");
     if (window.net && net.connected) net.send({ type: "turn", seat: seat });
   });
 }
@@ -391,3 +428,4 @@ tableSystem.closePanel = closeTablePanel;
 tableSystem.tryRoll = tryRoll;
 tableSystem.nearTable = nearTable;
 tableSystem.standUp = standUp;
+tableSystem.lockedForMe = tableLockedForMe;

@@ -411,7 +411,7 @@ function updateCamera() {
 function stepPlayer() {
   const p = engine.player;
   const chatOpen = document.getElementById("chat-dock") && !document.getElementById("chat-dock").classList.contains("closed");
-  if (p.seated || (window.tableSystem && tableSystem.panelOpen) || (window.game && game.uiLocked) || chatOpen) return;
+  if (p.seated || (window.tableSystem && (tableSystem.panelOpen || tableSystem.lockedForMe())) || (window.game && game.uiLocked) || chatOpen) return;
   if (p.poseUntil && p.poseUntil > performance.now()) return;
   const m = movement();
   if (m.x || m.y) {

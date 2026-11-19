@@ -278,17 +278,42 @@ def leave_room(client: Client) -> None:
             pass
 
 
-def apply_state(client: Client, msg: dict) -> None:
+def apply_state(client: Client, msg: dict, room: Room | None = None) -> None:
+    seated = bool(msg.get("seated"))
+    seat_id = msg.get("seatId") if msg.get("seatId") in SEATS else None
+    pose = msg.get("pose")
+    client.pose = str(pose)[:12] if pose else None
+    client.seen = time.time()
+    pinned = bool(
+        room
+        and room.locked
+        and client.seat_id
+        and room.seats.get(client.seat_id) == client.id
+        and room.seats.get("GM") != client.id
+    )
+    if pinned:
+        return
     client.x = int(msg.get("x") or client.x)
     client.y = int(msg.get("y") or client.y)
     client.dir = str(msg.get("dir") or "front")[:8]
     client.walk_frame = 1 if msg.get("walkFrame") else 0
-    client.seated = bool(msg.get("seated"))
-    client.seat_id = msg.get("seatId") if msg.get("seatId") in SEATS else None
+    client.seated = seated
+    client.seat_id = seat_id
     client.map_id = str(msg.get("mapId") or "hall")[:12]
-    pose = msg.get("pose")
-    client.pose = str(pose)[:12] if pose else None
-    client.seen = time.time()
+    if not room:
+        return
+    if seated and seat_id:
+        taken = room.seats.get(seat_id)
+        if taken and taken != client.id:
+            return
+        for s, cid in list(room.seats.items()):
+            if cid == client.id and s != seat_id:
+                room.seats[s] = None
+        room.seats[seat_id] = client.id
+    elif not seated:
+        for s, cid in list(room.seats.items()):
+            if cid == client.id:
+                room.seats[s] = None
 
 
 def handle_msg(client: Client, msg: dict) -> dict | None:
@@ -316,7 +341,7 @@ def handle_msg(client: Client, msg: dict) -> dict | None:
         return {"type": "error", "reason": "Sala sumiu."}
 
     if kind == "state":
-        apply_state(client, msg)
+        apply_state(client, msg, room)
         if client.mode == "ws":
             broadcast(room, {
                 "type": "players",
@@ -395,6 +420,8 @@ def handle_msg(client: Client, msg: dict) -> dict | None:
         return None
 
     if kind == "stand":
+        if room.locked and room.seats.get("GM") != client.id:
+            return {"type": "error", "reason": "Mesa travada. So emotes ate o mestre destravar."}
         with rooms_lock:
             for s, cid in list(room.seats.items()):
                 if cid == client.id:
@@ -411,7 +438,7 @@ def handle_msg(client: Client, msg: dict) -> dict | None:
 
     if kind == "lock":
         if room.seats.get("GM") != client.id:
-            return None
+            return {"type": "error", "reason": "Sente no lugar do Mestre para travar a mesa."}
         room.locked = bool(msg.get("locked"))
         broadcast(room, {
             "type": "seats",
@@ -423,16 +450,20 @@ def handle_msg(client: Client, msg: dict) -> dict | None:
 
     if kind == "turn":
         if room.seats.get("GM") != client.id:
-            return None
+            return {"type": "error", "reason": "Sente no lugar do Mestre para liberar a vez."}
         seat = msg.get("seat")
-        if seat in SEATS:
-            room.turn_seat = seat
-            broadcast(room, {
-                "type": "seats",
-                "seats": room.names_in_seats(),
-                "locked": room.locked,
-                "turnSeat": room.turn_seat,
-            })
+        if seat not in SEATS:
+            return {"type": "error", "reason": "Assento invalido."}
+        if not room.seats.get(seat):
+            return {"type": "error", "reason": "Esse assento esta vazio."}
+        room.turn_seat = seat
+        broadcast(room, {
+            "type": "seats",
+            "seats": room.names_in_seats(),
+            "locked": room.locked,
+            "turnSeat": room.turn_seat,
+        })
+        return None
     return None
 
 
@@ -596,7 +627,9 @@ def http_sync(payload: dict) -> dict:
         if key in seen:
             continue
         seen.add(key)
-        handle_msg(client, ev)
+        extra = handle_msg(client, ev)
+        if extra and len(client.events) < 40:
+            client.events.append(extra)
     with rooms_lock:
         room = rooms.get(client.room)
         if not room:

@@ -45,6 +45,7 @@ game.afterFrame = function () {
   let text = "";
 
   if (tableSystem.panelOpen || game.uiLocked) text = "";
+      else if (tableSystem.lockedForMe()) text = "Mesa travada. Emotes 1-6.  R: rolar se for sua vez.";
       else if (p.seated) text = "E: abrir mesa   R: rolar dados";
   else if (door) text = "E: entrar em " + door.label;
   else if (atTable) text = "E: sentar na mesa";
