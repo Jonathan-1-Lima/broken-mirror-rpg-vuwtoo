@@ -299,10 +299,43 @@ function drawPlayer() {
   drawNameTag(ctx, game.displayName, player.x - camera.x + PLAYER_W / 2, player.y - camera.y - 10);
 }
 
+function stepRemotes() {
+  (engine.remotes || []).forEach((r) => {
+    if (!r || r.tx == null) return;
+    if (r.seated) {
+      r.x = r.tx;
+      r.y = r.ty;
+      r.walkFrame = 0;
+      return;
+    }
+    const dx = r.tx - r.x;
+    const dy = r.ty - r.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > 90) {
+      r.x = r.tx;
+      r.y = r.ty;
+      r.walkFrame = 0;
+      return;
+    }
+    if (dist < 0.6) {
+      r.x = r.tx;
+      r.y = r.ty;
+      r.walkFrame = 0;
+      return;
+    }
+    const step = Math.min(dist, SPEED * 1.2);
+    r.x += (dx / dist) * step;
+    r.y += (dy / dist) * step;
+    if (Math.abs(dx) > Math.abs(dy)) r.dir = dx < 0 ? "left" : "right";
+    else r.dir = dy < 0 ? "back" : "front";
+    if (engine.frame % 8 === 0) r.walkFrame = r.walkFrame ? 0 : 1;
+  });
+}
+
 function drawRemotes() {
   const { ctx, camera, map } = engine;
   (engine.remotes || []).forEach((r) => {
-    if (!r || r.mapId !== map.id) return;
+    if (!r || (r.mapId && r.mapId !== map.id)) return;
     r.sheet = r.sheet || sheetForChar(r.charId);
     const img = currentSprite(r);
     ctx.drawImage(img, r.x - camera.x - 5, r.y - camera.y - 8);
@@ -389,6 +422,7 @@ function stepPlayer() {
     const ny = p.y + m.y * SPEED;
     if (!collide(nx, p.y, engine.solids)) p.x = nx;
     if (!collide(p.x, ny, engine.solids)) p.y = ny;
+    if (typeof bumpActive === "function") bumpActive();
     const mapW = engine.map.w * TILE;
     const mapH = engine.map.h * TILE;
     p.x = Math.max(TILE, Math.min(p.x, mapW - TILE - PLAYER_W));
@@ -409,6 +443,7 @@ function loop() {
   if (!engine.running) return;
   engine.frame++;
   stepPlayer();
+  stepRemotes();
   updateCamera();
   const ctx = engine.ctx;
   ctx.clearRect(0, 0, engine.canvas.width, engine.canvas.height);
